@@ -306,11 +306,43 @@ class NovelCrawler:
             r'.*txt下载.*',
             r'喜欢.*请大家收藏.*',
             r'[（\(].*?www.*?[）\)]',
+            r'『加入书签』',
+            r'『推荐票』',
+            r'『打赏』',
+            r'『投月票』',
+            r'PS[:：].*',
+            r'ps[:：].*',
+            r'作者有话说[:：].*',
+            r'作者说[:：].*',
+            r'.*求支持.*',
+            r'.*求订阅.*',
+            r'.*求月票.*',
+            r'.*求推荐票.*',
             r'^\s*$'  # 空行
         ]
         
+        # 新增：过滤作者留言相关段落的标志
+        in_author_note = False
+        
         # 过滤每一行
         for line in lines:
+            # 检查是否开始作者留言段落
+            if re.search(r'PS[：:](.*?)', line, re.IGNORECASE) or \
+               re.search(r'作者有话说[：:](.*?)', line, re.IGNORECASE) or \
+               re.search(r'求.*支持', line, re.IGNORECASE) or \
+               re.search(r'新书.*?求', line, re.IGNORECASE):
+                in_author_note = True
+                continue
+                
+            # 检查是否为结束标记
+            if re.search(r'『.*?』', line) or re.search(r'---+', line):
+                in_author_note = False
+                continue
+            
+            # 如果在作者留言段落中，跳过此行
+            if in_author_note:
+                continue
+            
             should_keep = True
             for pattern in ad_patterns:
                 if re.search(pattern, line, re.IGNORECASE):
@@ -331,6 +363,14 @@ class NovelCrawler:
         while '\n\n\n' in cleaned_content:
             cleaned_content = cleaned_content.replace('\n\n\n', '\n\n')
             
+        # 移除最后一段如果疑似作者留言
+        paragraphs = cleaned_content.split('\n\n')
+        if len(paragraphs) > 1:
+            last_para = paragraphs[-1].lower()
+            if ('ps' in last_para or '作者' in last_para or '求' in last_para or 
+                '新书' in last_para or '谢谢' in last_para or '感谢' in last_para):
+                cleaned_content = '\n\n'.join(paragraphs[:-1])
+        
         return cleaned_content
 
     def save_to_file(self, novel_title, chapter_index, chapter_title, content):
@@ -595,9 +635,12 @@ class NovelCrawler:
                     return {
                         "index": chapter_index,
                         "title": clean_name,
-                        "content": cleaned_content,
-                        "summary": "",  # 可以在需要时生成摘要
-                        "content_en": "",  # 可以在需要时生成翻译
+                        "content_cn": cleaned_content,
+                        "content_en": "",
+                        "summary_100": "",
+                        "summary": "",
+                        "outline_structured": None,
+                        "storyboard_structured": None,
                         "url": chapter_url
                     }
                 else:
@@ -732,7 +775,7 @@ class NovelCrawler:
                             self.state["novel_title"],
                             result["index"],
                             result["title"],
-                            result["content"]
+                            result["content_cn"]
                         )
                         
                         # 保存到数据库
@@ -740,10 +783,11 @@ class NovelCrawler:
                             novel_id=self.state["novel_id"],
                             chapter_index=result["index"],
                             chapter_title=result["title"],
-                            chapter_summary=result.get("summary", ""),
-                            chapter_content_cn=result["content"],
-                            chapter_content_en=result.get("content_en", ""),
-                            chapter_url=result["url"]
+                            chapter_url=result["url"],
+                            content_cn=result["content_cn"],
+                            content_en=result.get("content_en", ""),
+                            summary_100=result.get("summary_100", ""),
+                            summary=result.get("summary", "")
                         )
                         
                         # 更新状态
@@ -900,10 +944,11 @@ class NovelCrawler:
                     novel_id=self.state["novel_id"],
                     chapter_index=chapter["index"],
                     chapter_title=chapter["title"],
-                    chapter_summary=chapter["summary"],
-                    chapter_content_cn=chapter["content"],
-                    chapter_content_en=english_contents[i] if i < len(english_contents) else "",
-                    chapter_url=chapter["url"]
+                    chapter_url=chapter["url"],
+                    content_cn=chapter["content"],
+                    content_en=english_contents[i] if i < len(english_contents) else "",
+                    summary_100=chapter.get("summary_100", ""),
+                    summary=chapter.get("summary", "")
                 )
                 
                 # 更新状态
