@@ -11,7 +11,7 @@ from playwright.async_api import async_playwright
 from database import Database
 from deepseek_client import DeepSeekClient
 from config import CRAWLER_CONFIG, STORAGE_CONFIG
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 # 配置日志
 def setup_logging():
@@ -522,7 +522,12 @@ class NovelCrawler:
             try:
                 # 访问章节页面
                 logging.info(f"正在访问章节页面: {chapter_url}")
-                await page.goto(chapter_url, timeout=180000)
+                response = await page.goto(chapter_url, timeout=180000)
+                
+                # 检查页面是否可以访问
+                if not response or response.status >= 400:
+                    logging.warning(f"章节页面无法访问: {chapter_url}，状态码: {response.status if response else 'N/A'}")
+                    return None
                 
                 # 等待页面加载
                 await page.wait_for_load_state("networkidle", timeout=60000)
@@ -530,6 +535,11 @@ class NovelCrawler:
                 # 记录初始页面标题
                 page_title = await page.title()
                 logging.info(f"页面标题: {page_title}")
+                
+                # 检查是否是有效的章节页
+                if "404" in page_title or "找不到" in page_title or "不存在" in page_title:
+                    logging.warning(f"章节页面可能不存在: {chapter_url}，标题: {page_title}")
+                    return None
                 
                 # 滚动到底部并获取完整内容
                 full_html = await self.scroll_to_bottom(page)
@@ -623,8 +633,29 @@ class NovelCrawler:
                 # 清理内容
                 cleaned_content = self.clean_chapter_content(content)
                 
-                # 获取干净的章节名称
-                clean_name = self.get_clean_chapter_name(title, chapter_index)
+                # 从URL或标题提取章节标题
+                chapter_title = ""
+                
+                # 如果是URL递增生成的章节，尝试从URL和页面标题提取章节信息
+                if chapter_info and "title" in chapter_info and chapter_info["title"].startswith("第") and chapter_info["title"].endswith("章"):
+                    # 使用URL递增生成的标题
+                    chapter_title = chapter_info["title"]
+                    
+                    # 尝试从页面标题获取更具体的章节名
+                    try:
+                        page_title_clean = self.clean_chapter_title(title)
+                        if page_title_clean:
+                            # 提取章节名，通常格式为"第X章 章节名"
+                            title_match = re.search(r'第.*?章\s+(.*)', page_title_clean)
+                            if title_match:
+                                specific_title = title_match.group(1).strip()
+                                if specific_title:
+                                    chapter_title = f"{chapter_info['title']} {specific_title}"
+                    except Exception as e:
+                        logging.error(f"提取章节标题时出错: {e}")
+                else:
+                    # 获取干净的章节名称
+                    chapter_title = self.get_clean_chapter_name(title, chapter_index)
                 
                 # 最终结果
                 content_length = len(cleaned_content) if cleaned_content else 0
@@ -634,7 +665,7 @@ class NovelCrawler:
                 if cleaned_content and content_length > 300:
                     return {
                         "index": chapter_index,
-                        "title": clean_name,
+                        "title": chapter_title,
                         "content_cn": cleaned_content,
                         "content_en": "",
                         "summary_100": "",
@@ -678,17 +709,12 @@ class NovelCrawler:
             # 分析章节列表页
             result = self.deepseek_client.all_in_one_analysis(html, self.state)
             
-            if result.get("page_type") != "chapter_list":
-                logging.error(f"页面类型不是章节列表: {result.get('page_type')}")
-                return
-            
             # 保存小说基本信息
             title = result.get("title", "未知")
             author = result.get("author", "未知")
             chapters = result.get("chapters", [])
             
             logging.info(f"获取小说信息: {title} - 作者: {author}")
-            logging.info(f"已提取章节列表，共 {len(chapters)} 章")
             
             # 更新爬虫状态
             self.state["novel_title"] = title
@@ -703,51 +729,101 @@ class NovelCrawler:
                 category_id=1
             )
             
+            # 尝试从DeepSeek API获取章节列表
+            chapter_urls = []
+            if result.get("page_type") == "chapter_list" and chapters:
+                logging.info(f"已提取章节列表，共 {len(chapters)} 章")
+                
+                for chapter in chapters:
+                    chapter_url = chapter.get("url")
+                    if not chapter_url and "selector" in chapter:
+                        # 如果没有直接URL，尝试从选择器获取
+                        selector = chapter.get("selector")
+                        try:
+                            element = await self.page.query_selector(selector)
+                            if element:
+                                href = await element.get_attribute("href")
+                                if href:
+                                    if href.startswith("http"):
+                                        chapter_url = href
+                                    else:
+                                        # 相对路径转绝对路径
+                                        base_url = self.page.url
+                                        chapter_url = urljoin(base_url, href)
+                        except Exception as e:
+                            logging.error(f"获取章节链接失败: {e}")
+                    
+                    # 修复URL路径问题，确保所有URL都是绝对路径
+                    if chapter_url:
+                        # 如果是相对路径，转换为绝对路径
+                        if not chapter_url.startswith('http'):
+                            base_url = self.page.url
+                            chapter_url = urljoin(base_url, chapter_url)
+                        
+                        chapter_urls.append({
+                            "index": len(chapter_urls),
+                            "url": chapter_url,
+                            "title": chapter.get("title", f"第{len(chapter_urls)+1}章")
+                        })
+                        logging.info(f"添加章节 URL: {chapter_url}")
+            
+            # 如果没有找到章节列表或章节数量过少，尝试从DOM直接提取
+            if len(chapter_urls) < 5:
+                logging.info("DeepSeek API提取章节数量过少，尝试从DOM直接提取...")
+                dom_chapters = await self.extract_chapter_links_from_dom(self.page)
+                
+                if len(dom_chapters) > len(chapter_urls):
+                    logging.info(f"从DOM提取到更多章节: {len(dom_chapters)} > {len(chapter_urls)}")
+                    chapter_urls = dom_chapters
+            
+            # 强制使用URL递增方式，无论是否找到足够的章节链接
+            logging.info("启用URL递增备用方案...")
+            
+            # 提取小说ID
+            novel_id = None
+            path_parts = urlparse(url).path.strip('/').split('/')
+            for part in path_parts:
+                if part.isdigit():
+                    novel_id = part
+                    break
+            
+            if not novel_id:
+                novel_id = "43863"  # 默认使用星门的ID
+                
+            # 构建URL模式
+            base_url = f"{urlparse(url).scheme}://{urlparse(url).netloc}"
+            base_pattern = f"{base_url}/html/{novel_id}/{{0}}.html"
+            
+            # 清空之前的章节列表
+            chapter_urls = []
+            
+            # 生成所有章节URL
+            max_chapter = 640  # 设置最大章节数，比实际章节数多一些
+            for i in range(1, max_chapter + 1):
+                chapter_urls.append({
+                    "index": i - 1,
+                    "url": base_pattern.format(i),
+                    "title": f"第{i}章"
+                })
+            
+            logging.info(f"URL递增方式生成了 {len(chapter_urls)} 个章节URL")
+            
             # 限制章节数量
-            if limit_chapters > 0 and len(chapters) > limit_chapters:
-                chapters = chapters[:limit_chapters]
+            if limit_chapters is not None and limit_chapters > 0 and len(chapter_urls) > limit_chapters:
+                chapter_urls = chapter_urls[:limit_chapters]
                 logging.info(f"限制爬取前 {limit_chapters} 章")
             
-            # 缓存章节URLs
-            chapter_urls = []
-            for chapter in chapters:
-                chapter_url = chapter.get("url")
-                if not chapter_url and "selector" in chapter:
-                    # 如果没有直接URL，尝试从选择器获取
-                    selector = chapter.get("selector")
-                    try:
-                        element = await self.page.query_selector(selector)
-                        if element:
-                            href = await element.get_attribute("href")
-                            if href:
-                                if href.startswith("http"):
-                                    chapter_url = href
-                                else:
-                                    # 相对路径转绝对路径
-                                    base_url = self.page.url
-                                    chapter_url = urljoin(base_url, href)
-                    except Exception as e:
-                        logging.error(f"获取章节链接失败: {e}")
+            # 如果没有找到章节URL，无法继续
+            if not chapter_urls:
+                logging.warning("没有找到任何章节URL，无法继续爬取")
+                return
                 
-                # 修复URL路径问题，确保所有URL都是绝对路径
-                if chapter_url:
-                    # 如果是相对路径，转换为绝对路径
-                    if not chapter_url.startswith('http'):
-                        base_url = self.page.url
-                        chapter_url = urljoin(base_url, chapter_url)
-                    
-                    chapter_urls.append({
-                        "index": len(chapter_urls),
-                        "url": chapter_url,
-                        "title": chapter.get("title", f"第{len(chapter_urls)+1}章")
-                    })
-                    logging.info(f"添加章节 URL: {chapter_url}")
-            
-            logging.info(f"成功获取 {len(chapter_urls)} 个章节URL")
-            
             # 并行爬取章节内容
-            batch_size = min(self.parallel_chapters, len(chapter_urls))
+            batch_size = min(max(1, self.parallel_chapters), len(chapter_urls))
             logging.info(f"设置并行爬取批次大小: {batch_size}")
+            
+            # 记录实际存在的章节URL
+            valid_chapter_urls = []
             
             # 分批次爬取
             for i in range(0, len(chapter_urls), batch_size):
@@ -790,6 +866,9 @@ class NovelCrawler:
                             summary=result.get("summary", "")
                         )
                         
+                        # 记录有效的章节URL
+                        valid_chapter_urls.append(result["url"])
+                        
                         # 更新状态
                         self.state["completed_chapters"].append(result["index"])
                         self.state["current_chapter"] = max(self.state["current_chapter"], result["index"] + 1)
@@ -797,6 +876,13 @@ class NovelCrawler:
                         successful_chapters += 1
                 
                 logging.info(f"第 {i//batch_size + 1} 批次完成，成功爬取 {successful_chapters}/{len(batch)} 个章节")
+                
+                # 对于URL递增方式，如果连续5个章节都无法获取内容，认为已到达最后一章
+                if len(valid_chapter_urls) > 0 and successful_chapters == 0:
+                    consecutive_failures = i + batch_size - len(valid_chapter_urls)
+                    if consecutive_failures >= 5:
+                        logging.info(f"连续 {consecutive_failures} 个章节无法获取内容，可能已到达最后一章")
+                        break
                 
                 # 简单的反爬虫措施
                 if i + batch_size < len(chapter_urls):
@@ -964,6 +1050,142 @@ class NovelCrawler:
             self.state["current_chapter"] = max_index + 1
             
         return len(chapters_content)
+
+    async def extract_chapter_links_from_dom(self, page):
+        """直接从DOM提取章节链接，不依赖DeepSeek API"""
+        logging.info("开始从DOM直接提取章节链接...")
+        
+        try:
+            # 常见的章节列表容器选择器
+            container_selectors = [
+                "#chapter-list", 
+                ".chapter-list", 
+                "#chapters", 
+                ".chapters",
+                "#list", 
+                ".list", 
+                "#chapterlist", 
+                ".chapterlist",
+                "#directory", 
+                ".directory",
+                ".catalog",
+                "#catalog"
+            ]
+            
+            chapter_urls = []
+            
+            # 先尝试通过容器选择器定位章节列表区域
+            for selector in container_selectors:
+                try:
+                    container = await page.query_selector(selector)
+                    if container:
+                        logging.info(f"找到章节列表容器: {selector}")
+                        
+                        # 从容器中提取所有链接
+                        links = await container.query_selector_all("a")
+                        
+                        if links and len(links) > 0:
+                            logging.info(f"从容器 {selector} 中找到 {len(links)} 个链接")
+                            
+                            for i, link in enumerate(links):
+                                try:
+                                    href = await link.get_attribute("href")
+                                    text = await link.inner_text()
+                                    
+                                    # 过滤非章节链接（通常章节链接包含数字或特定模式）
+                                    if href and (re.search(r'/\d+\.html', href) or 
+                                                re.search(r'chapter', href) or 
+                                                re.search(r'chap', href)):
+                                        
+                                        # 处理相对URL
+                                        if not href.startswith('http'):
+                                            base_url = page.url
+                                            href = urljoin(base_url, href)
+                                        
+                                        chapter_urls.append({
+                                            "index": len(chapter_urls),
+                                            "title": text.strip() or f"第{len(chapter_urls)+1}章",
+                                            "url": href
+                                        })
+                                        
+                                except Exception as e:
+                                    logging.error(f"提取链接信息出错: {e}")
+                            
+                            # 如果找到足够多的链接，就不继续查找了
+                            if len(chapter_urls) > 5:
+                                break
+                except Exception as e:
+                    logging.error(f"处理容器 {selector} 时出错: {e}")
+            
+            # 如果通过容器选择器没有找到足够多的链接，尝试直接选择所有链接
+            if len(chapter_urls) < 5:
+                logging.info("通过容器选择器未找到足够的章节链接，尝试直接选择所有链接...")
+                
+                # 获取页面中所有的链接
+                all_links = await page.query_selector_all("a")
+                logging.info(f"页面共有 {len(all_links)} 个链接")
+                
+                # 过滤出可能的章节链接
+                for link in all_links:
+                    try:
+                        href = await link.get_attribute("href")
+                        text = await link.inner_text()
+                        
+                        # 判断是否为章节链接：章节链接通常包含数字和中文数字，或包含"章"字
+                        is_chapter = False
+                        
+                        if href and text:
+                            # 判断链接文本是否为章节标题
+                            if re.search(r'第[0-9一二三四五六七八九十百千]+章', text) or \
+                               re.search(r'[0-9]+\.', text) or \
+                               (re.search(r'/\d+\.html', href) and len(text.strip()) > 1):
+                                is_chapter = True
+                        
+                        if is_chapter:
+                            # 处理相对URL
+                            if not href.startswith('http'):
+                                base_url = page.url
+                                href = urljoin(base_url, href)
+                            
+                            # 检查是否已存在相同URL
+                            if not any(item["url"] == href for item in chapter_urls):
+                                chapter_urls.append({
+                                    "index": len(chapter_urls),
+                                    "title": text.strip() or f"第{len(chapter_urls)+1}章",
+                                    "url": href
+                                })
+                    except Exception as e:
+                        logging.error(f"处理链接时出错: {e}")
+            
+            # 按顺序排序章节（如果章节标题包含数字）
+            try:
+                # 尝试提取章节序号用于排序
+                def get_chapter_number(chapter):
+                    title = chapter["title"]
+                    match = re.search(r'第(\d+)章', title)
+                    if match:
+                        return int(match.group(1))
+                    match = re.search(r'(\d+)', title)
+                    if match:
+                        return int(match.group(1))
+                    return chapter["index"]
+                
+                chapter_urls.sort(key=get_chapter_number)
+                
+                # 重新分配索引
+                for i, chapter in enumerate(chapter_urls):
+                    chapter["index"] = i
+                    
+            except Exception as e:
+                logging.error(f"章节排序时出错: {e}")
+            
+            logging.info(f"DOM提取总共找到 {len(chapter_urls)} 个章节链接")
+            return chapter_urls
+            
+        except Exception as e:
+            logging.error(f"从DOM提取章节链接时出错: {e}")
+            logging.error(traceback.format_exc())
+            return []
 
 async def main():
     crawler = NovelCrawler()
