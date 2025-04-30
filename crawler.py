@@ -94,6 +94,7 @@ class NovelCrawler:
         self.claude_client = ClaudeClient()  # 添加Claude客户端
         self.base_url = CRAWLER_CONFIG['base_url']
         self.headers = CRAWLER_CONFIG['headers']
+        self.lock = asyncio.Lock()  # 添加asyncio锁对象，用于同步页面访问
         self.state = {
             "phase": "initial",  # initial, novel_info, chapter_list, chapter_content
             "novel_id": None,
@@ -1006,8 +1007,51 @@ class NovelCrawler:
             # 清空之前的章节列表
             chapter_urls = []
             
+            # 首先尝试获取最大章节数
+            try:
+                logger.info("尝试确定最大章节数...")
+                # 先尝试获取章节列表页
+                chapter_list_url = f"{base_url}/html/{novel_id}/"
+                async with self.lock:
+                    if not self.page:
+                        await self.init_browser()
+                    await self.page.goto(chapter_list_url, timeout=30000)
+                    html_content = await self.page.content()
+                
+                # 解析章节列表页面获取章节信息
+                soup = BeautifulSoup(html_content, 'html.parser')
+                chapter_links = []
+                
+                # 查找所有可能的章节链接
+                for a_tag in soup.select('a[href*=".html"]'):
+                    href = a_tag.get('href', '')
+                    title = a_tag.text.strip()
+                    # 过滤章节链接（通常包含数字和.html）
+                    if href and title and re.search(r'/\d+\.html$', href):
+                        chapter_num_match = re.search(r'/(\d+)\.html$', href)
+                        if chapter_num_match:
+                            chapter_num = int(chapter_num_match.group(1))
+                            chapter_links.append({
+                                "index": chapter_num,
+                                "url": href if href.startswith('http') else urljoin(chapter_list_url, href),
+                                "title": title
+                            })
+                
+                # 如果找到章节链接，确定最大章节号
+                if chapter_links:
+                    max_chapter = max([c["index"] for c in chapter_links])
+                    logger.info(f"从章节列表中找到 {len(chapter_links)} 个章节，最大章节号: {max_chapter}")
+                else:
+                    # 如果无法从列表中找到，使用默认值
+                    max_chapter = CRAWLER_CONFIG.get('max_chapters', 1000)
+                    logger.warning(f"未能从章节列表中找到章节链接，使用默认最大章节数: {max_chapter}")
+            except Exception as e:
+                logger.warning(f"确定最大章节数时出错: {e}")
+                # 使用配置文件中的默认值
+                max_chapter = CRAWLER_CONFIG.get('max_chapters', 1000)
+                logger.info(f"使用配置中的默认最大章节数: {max_chapter}")
+            
             # 生成所有章节URL
-            max_chapter = 640  # 设置最大章节数，比实际章节数多一些
             for i in range(1, max_chapter + 1):
                 chapter_urls.append({
                     "index": i - 1,
@@ -1599,6 +1643,11 @@ class NovelCrawler:
             return f".{' .'.join(element['class'])}"
         else:
             return element.name
+
+    async def determine_max_chapter(self, novel_id, base_url):
+        """尝试确定小说的最大章节数 - 此方法已弃用"""
+        logger.warning("determine_max_chapter 方法已弃用，请使用章节列表解析")
+        return CRAWLER_CONFIG.get('max_chapters', 1000)
 
 async def main():
     crawler = NovelCrawler()
