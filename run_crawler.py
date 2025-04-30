@@ -1,5 +1,6 @@
 import asyncio
 import argparse
+import logging
 from crawler import NovelCrawler
 from config import CRAWLER_CONFIG
 
@@ -24,12 +25,52 @@ def parse_arguments():
                         help='是否跳过图片加载')
     parser.add_argument('--block-ads', action='store_true', default=True,
                         help='是否阻止广告脚本')
+    parser.add_argument('--log-level', type=str, choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'], 
+                        default='INFO', help='日志级别：DEBUG(调试)/INFO(信息)/WARNING(警告)/ERROR(错误)')
+    parser.add_argument('--quiet', action='store_true',
+                        help='安静模式，只输出错误信息')
     
     return parser.parse_args()
+
+def set_log_level(level_name, quiet=False):
+    """设置日志级别"""
+    # 转换日志级别字符串为logging模块的常量
+    level_map = {
+        'DEBUG': logging.DEBUG,
+        'INFO': logging.INFO,
+        'WARNING': logging.WARNING,
+        'ERROR': logging.ERROR
+    }
+    log_level = level_map.get(level_name, logging.INFO)
+    
+    # 如果是安静模式，覆盖为WARNING级别
+    if quiet:
+        log_level = logging.WARNING
+    
+    # 设置根日志记录器级别
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+    
+    # 设置各个子日志记录器级别
+    loggers = [
+        logging.getLogger('crawler'),
+        logging.getLogger('network'),
+        logging.getLogger('parser'),
+        logging.getLogger('database'),
+        logging.getLogger('ai')
+    ]
+    
+    for logger in loggers:
+        logger.setLevel(log_level)
+    
+    print(f"[设置] 日志级别: {level_name}" + (" (安静模式)" if quiet else ""))
 
 async def main():
     # 解析命令行参数
     args = parse_arguments()
+    
+    # 设置日志级别
+    set_log_level(args.log_level, args.quiet)
     
     # 实例化爬虫
     print("[Python] [初始化] 创建爬虫实例")
