@@ -11,9 +11,10 @@ from playwright.async_api import async_playwright
 from database.database import Database
 from ai_client.deepseek_client import DeepSeekClient
 from ai_client.claude_client import ClaudeClient
-from config import CRAWLER_CONFIG, PROMPT_TEMPLATES, STORAGE_CONFIG, COOKIES
+from config import CRAWLER_CONFIG, PROMPT_TEMPLATES, STORAGE_CONFIG, COOKIES, APIFY_CONFIG
 from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
+from apify_client import ApifyClientAsync
 
 # 配置日志
 def setup_logging():
@@ -107,6 +108,15 @@ class NovelCrawler:
         }
         self.browser_initialized = False
         
+        # 初始化Apify相关属性（默认为None）
+        self.use_apify = CRAWLER_CONFIG.get('use_apify', False)
+        self.apify_client = None
+        self.apify_actor_id = None
+        
+        # 如果配置中启用了Apify，则初始化相关客户端
+        if self.use_apify:
+            self.enable_apify()
+        
         # 性能调优参数
         self.parallel_chapters = 3  # 并行爬取章节数
         self.wait_timeout = 5000  # 元素等待超时时间(ms)
@@ -115,6 +125,15 @@ class NovelCrawler:
         self.skip_images = True  # 是否跳过图片加载
         
         logger.info("爬虫初始化完成")
+
+    def enable_apify(self):
+        """启用Apify并初始化相关客户端"""
+        if not self.apify_client:
+            self.use_apify = True
+            self.apify_client = ApifyClientAsync(APIFY_CONFIG.get('api_token'))
+            self.apify_actor_id = APIFY_CONFIG.get('actor_id')
+            logger.info("Apify客户端初始化完成")
+        return self
 
     async def init_browser(self):
         """初始化浏览器，使用 Firefox 内核"""
@@ -155,6 +174,62 @@ class NovelCrawler:
             logger.info("浏览器已关闭")
         except Exception as e:
             logger.error(f"关闭浏览器出错: {e}")
+
+    async def apify_scrape(self, url):
+        """使用Apify Cloudflare Web Scraper爬取网页内容"""
+        if not self.use_apify:
+            logger.warning("Apify未启用，无法使用Apify爬取")
+            return None
+            
+        try:
+            run_input = {
+                "execute_js_async": False,
+                "js_script": "return 10 + 10 + 20",  # 默认js返回值
+                "js_timeout": APIFY_CONFIG.get('js_timeout', 10),
+                "max_retries_per_url": APIFY_CONFIG.get('max_retries', 2),
+                "page_is_loaded_before_running_script": True,
+                "proxy": {
+                    "useApifyProxy": APIFY_CONFIG.get('proxy_groups', False) != False
+                },
+                "retrieve_html_from_url_after_loaded": True,
+                "retrieve_result_from_js_script": True,
+                "urls": [url]
+            }
+            
+            logger.info(f"开始使用Apify爬取页面: {url}")
+            actor_client = self.apify_client.actor(self.apify_actor_id)
+            run = await actor_client.call(run_input=run_input)
+            
+            if run is None:
+                logger.error("Apify爬取失败：Actor运行失败")
+                return None
+                
+            # 获取结果
+            dataset_client = self.apify_client.dataset(run["defaultDatasetId"])
+            items_result = await dataset_client.list_items()
+            items = items_result.items
+            
+            if not items:
+                logger.error("Apify爬取失败：未获取到任何数据")
+                return None
+                
+            # 获取HTML内容
+            html_content = items[0].get("html", "")
+            if not html_content:
+                logger.error("Apify爬取失败：HTML内容为空")
+                return None
+                
+            # 获取JavaScript脚本执行结果
+            js_result = items[0].get("resultFromScript")
+            logger.info(f"JavaScript脚本执行结果: {js_result}")
+                
+            logger.info(f"Apify爬取成功，获取到 {len(html_content)} 字节的HTML内容")
+            return html_content
+            
+        except Exception as e:
+            logger.error(f"使用Apify爬取过程中发生错误: {e}")
+            logger.error(traceback.format_exc())
+            return None
 
     def clean_chapter_title(self, title):
         """清理章节标题，去除求收藏、推荐等字样"""
@@ -532,112 +607,58 @@ class NovelCrawler:
                 else:
                     logger.info(f"正在获取章节 #{chapter_index+1}: {chapter_url}")
                 
-                # 保存当前cookies
-                cookies = await self.context.cookies()
+                # 使用Apify或Playwright获取内容
+                if self.use_apify:
+                    # 使用Apify获取章节内容
+                    logger.info(f"使用Apify获取章节内容: {chapter_url}")
+                    html = await self.apify_scrape(chapter_url)
+                    
+                    if not html:
+                        logger.error("Apify获取章节内容失败")
+                        return "", "", False
+                else:
+                    # 使用Playwright获取章节内容
+                    # 保存当前cookies
+                    cookies = await self.context.cookies()
+                    
+                    # 创建新页面进行导航，避免主页面被中断
+                    page = await self.context.new_page()
+                    try:
+                        # 设置页面超时
+                        page.set_default_navigation_timeout(180000)
+                        
+                        # 访问章节页面
+                        await page.goto(chapter_url, timeout=180000)
+                        
+                        # 等待内容加载
+                        await page.wait_for_load_state('networkidle', timeout=30000)
+                        
+                        # 获取页面内容
+                        html = await page.content()
+                    finally:
+                        # 确保页面关闭
+                        if page and not page.is_closed():
+                            await page.close()
+                        # 恢复cookies
+                        try:
+                            await self.context.add_cookies(cookies)
+                        except:
+                            pass
                 
-                # 创建新页面进行导航，避免主页面被中断
-                page = await self.context.new_page()
-                try:
-                    # 设置页面超时
-                    page.set_default_navigation_timeout(180000)
-                    
-                    # 访问章节页面
-                    await page.goto(chapter_url, timeout=180000)
-                    
-                    # 等待内容加载
-                    await page.wait_for_load_state('networkidle', timeout=30000)
-                    
-                    # 获取页面内容
-                    html = await page.content()
-                    
-                    # 1. 首先尝试DOM处理
-                    parser_logger.info(f"尝试DOM提取章节 #{chapter_index+1}")
-                    dom_result = await self.extract_chapter_content_from_dom(html)
-                    
-                    if dom_result["is_complete"]:
-                        # DOM处理成功，直接返回结果
-                        chapter_title = dom_result["title"]
-                        chapter_content = dom_result["content"]
-                        is_complete = True
-                        
-                        # 保存到数据库
-                        if self.state["novel_id"]:
-                            # 确保URL是完整的
-                            full_chapter_url = chapter_url if chapter_url.startswith('http') else urljoin(self.base_url, chapter_url)
-                            
-                            chapter_data = {
-                                "novel_id": self.state["novel_id"],
-                                "chapter_index": chapter_index,
-                                "title": chapter_title,
-                                "content": chapter_content,
-                                "url": full_chapter_url,
-                                "is_complete": is_complete,
-                                "word_count": len(chapter_content),
-                                "created_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                            }
-                            
-                            db_logger.info(f"保存章节 #{chapter_index+1} 到数据库")
-                            self.db.save_chapter(chapter_data)
-                            
-                            # 如果指定了本地存储，保存到文件
-                            if STORAGE_CONFIG.get('save_to_file', False):
-                                file_path = self.save_to_file(
-                                    self.state["novel_title"], 
-                                    chapter_index,
-                                    chapter_title,
-                                    chapter_content
-                                )
-                                logger.info(f"章节已保存到文件: {file_path}")
-                        
-                        await page.close()
-                        return chapter_title, chapter_content, is_complete
-                    
-                    # 2. DOM处理失败，使用大模型处理
-                    ai_logger.info(f"DOM处理失败，使用AI处理章节 #{chapter_index+1}")
-                    
-                    if CRAWLER_CONFIG['use_claude']:
-                        # 使用Claude处理
-                        ai_logger.info(f"Claude处理中... (输入大小: {len(html[:150000])} 字符)")
-                        prompt = PROMPT_TEMPLATES['chapter_content'].format(content=html[:150000])
-                        response = self.claude_client.call_claude(prompt)
-                        
-                        if response and "<<<CONTENT_START>>>" in response:
-                            # 解析Claude响应
-                            title_match = re.search(r"标题[:：]\s*(.*?)(?:\n|$)", response)
-                            content_match = re.search(r"正文[:：]\s*([\s\S]*?)(?=<<<CONTENT_END>>>)", response)
-                            
-                            chapter_title = title_match.group(1).strip() if title_match else f"第{chapter_index+1}章"
-                            chapter_content = content_match.group(1).strip() if content_match else ""
-                            is_complete = "<<<PROCESSING_COMPLETE>>>" in response
-                            
-                            ai_logger.info(f"Claude处理成功: 提取 {len(chapter_content)} 字符")
-                        else:
-                            ai_logger.error(f"Claude处理失败")
-                            raise Exception("Claude处理失败，尝试重试或使用DeepSeek")
-                    else:
-                        # 使用DeepSeek处理
-                        ai_logger.info(f"DeepSeek处理中... (输入大小: {len(html[:80000])} 字符)")
-                        prompt = PROMPT_TEMPLATES['chapter_content'].format(content=html[:80000])
-                        response = self.deepseek_client._call_api(prompt)
-                        
-                        if response and "<<<CONTENT_START>>>" in response:
-                            # 解析DeepSeek响应
-                            title_match = re.search(r"标题[:：]\s*(.*?)(?:\n|$)", response)
-                            content_match = re.search(r"正文[:：]\s*([\s\S]*?)(?=<<<CONTENT_END>>>)", response)
-                            
-                            chapter_title = title_match.group(1).strip() if title_match else f"第{chapter_index+1}章"
-                            chapter_content = content_match.group(1).strip() if content_match else ""
-                            is_complete = "<<<PROCESSING_COMPLETE>>>" in response
-                            
-                            ai_logger.info(f"DeepSeek处理成功: 提取 {len(chapter_content)} 字符")
-                        else:
-                            ai_logger.error(f"DeepSeek处理失败")
-                            raise Exception("DeepSeek处理失败，尝试重试")
+                # 1. 首先尝试DOM处理
+                parser_logger.info(f"尝试DOM提取章节 #{chapter_index+1}")
+                dom_result = await self.extract_chapter_content_from_dom(html)
+                
+                if dom_result["is_complete"]:
+                    # DOM处理成功，直接返回结果
+                    chapter_title = dom_result["title"]
+                    chapter_content = dom_result["content"]
+                    is_complete = True
                     
                     # 保存到数据库
                     if self.state["novel_id"]:
-                        # 确保URL是完整的
-                        full_chapter_url = chapter_url if chapter_url.startswith('http') else urljoin(self.base_url, chapter_url)
+                        # 直接使用传入的chapter_url，确保URL是准确的
+                        full_chapter_url = chapter_url
                         
                         chapter_data = {
                             "novel_id": self.state["novel_id"],
@@ -650,7 +671,7 @@ class NovelCrawler:
                             "created_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         }
                         
-                        db_logger.info(f"保存AI处理的章节 #{chapter_index+1} 到数据库")
+                        db_logger.info(f"保存章节 #{chapter_index+1} 到数据库")
                         self.db.save_chapter(chapter_data)
                         
                         # 如果指定了本地存储，保存到文件
@@ -663,14 +684,12 @@ class NovelCrawler:
                             )
                             logger.info(f"章节已保存到文件: {file_path}")
                     
-                    await page.close()
                     return chapter_title, chapter_content, is_complete
+                
+                # DOM处理失败，直接返回失败(不再使用AI)
+                logger.warning(f"DOM处理章节 #{chapter_index+1} 失败")
+                return "", "", False
                     
-                finally:
-                    # 确保页面关闭
-                    if page and not page.is_closed():
-                        await page.close()
-                        
             except Exception as e:
                 retry_count += 1
                 logger.error(f"获取章节 #{chapter_index+1} 出错: {e}")
@@ -697,12 +716,6 @@ class NovelCrawler:
                         pass
                     
                     return "", "", False
-            finally:
-                # 确保恢复cookies
-                try:
-                    await self.context.add_cookies(cookies)
-                except:
-                    pass
 
     async def determine_max_chapter(self, novel_id, base_url):
         """根据AI解析结果确定小说的最大章节数"""
@@ -719,18 +732,29 @@ class NovelCrawler:
 
     async def crawl_novel(self, url: str, limit_chapters: int = 0):
         try:
-            # 初始化浏览器
-            await self.init_browser()
-            # 自动模式：程序自动跳转到目标页面
-            logger.info(f"正在访问页面: {url}")
-            await self.page.goto(url, timeout=180000)
-            # 滚动到底部确保加载所有章节
-            await self.scroll_to_bottom(self.page)
-            # 获取页面内容
-            html = await self.page.content()
+            # 保存当前URL
+            self.state["current_url"] = url
+            
+            if self.use_apify:
+                # 使用Apify获取页面内容
+                logger.info(f"使用Apify爬取页面: {url}")
+                html = await self.apify_scrape(url)
+                if not html:
+                    logger.error("使用Apify获取页面内容失败")
+                    return
+            else:
+                # 使用Playwright获取页面内容
+                await self.init_browser()
+                logger.info(f"正在访问页面: {url}")
+                await self.page.goto(url, timeout=180000)
+                # 滚动到底部确保加载所有章节
+                await self.scroll_to_bottom(self.page)
+                html = await self.page.content()
+            
             # 首先使用DOM预处理提取章节列表
             logger.info("使用DOM预处理提取章节信息...")
-            extracted_data = await self.extract_data_from_dom(html, "chapter_list")
+            # 传入当前URL作为base_url参数，确保章节URL正确拼接
+            extracted_data = await self.extract_data_from_dom(html, "chapter_list", base_url=url)
             
             # 获取基本信息
             title = extracted_data.get("title", "未知标题")
@@ -813,7 +837,7 @@ class NovelCrawler:
                         "description": description,
                         "chapter_count": len(self.chapters),
                         "status": "ongoing" if not is_complete else "completed",
-                        "last_updated": datetime.datetime.now()
+                        "last_updated": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     }
                 )
                 novel_id = self.state["novel_id"]
@@ -834,8 +858,8 @@ class NovelCrawler:
             for chapter in self.chapters:
                 chapter_url = chapter.get('url')
                 if chapter_url:
-                    # 确保URL是完整的
-                    full_chapter_url = chapter_url if chapter_url.startswith('http') else urljoin(self.base_url, chapter_url)
+                    # 确保URL是完整的，使用当前爬取的URL作为基础
+                    full_chapter_url = chapter_url if chapter_url.startswith('http') else urljoin(url, chapter_url)
                     logger.info(f"添加章节 URL: {full_chapter_url}")
                     self.db.save_chapter({
                         "novel_id": novel_id,
@@ -843,6 +867,9 @@ class NovelCrawler:
                         "chapter_title": chapter.get('title', ''),
                         "chapter_url": full_chapter_url
                     })
+            
+            # 更新base_url为当前URL，确保后续章节获取使用正确的基础URL
+            self.base_url = url
             
             # 确定最大章节数
             max_chapters = await self.determine_max_chapter(novel_id, url)
@@ -890,7 +917,7 @@ class NovelCrawler:
         """并行处理多个章节"""
         if not hasattr(self, 'chapters') or not self.chapters:
             logger.warning("没有章节可以并行处理")
-            return
+            return 0
             
         # 获取要处理的章节
         start_index = self.state.get("current_chapter", 0)
@@ -899,113 +926,256 @@ class NovelCrawler:
         
         if not chapters_to_process:
             logger.warning("没有找到要处理的章节")
-            return
+            return 0
             
         logger.info(f"开始并行处理 {len(chapters_to_process)} 个章节")
         
-        # 确保浏览器上下文已初始化
-        if not hasattr(self, 'context') or self.context is None:
-            logger.error("浏览器上下文未初始化")
-            return
+        # 如果使用Apify，则直接使用Apify处理章节，无需浏览器上下文
+        if self.use_apify:
+            logger.info("使用Apify模式处理章节")
+            # 设置并发限制
+            max_concurrent = min(3, len(chapters_to_process))  # 最多同时处理3个章节
             
-        # 设置并发限制
-        max_concurrent = min(3, len(chapters_to_process))  # 最多同时处理3个章节
-        logger.info(f"设置最大并发数为: {max_concurrent}")
+            # 创建处理任务
+            tasks = []
+            for i, chapter in enumerate(chapters_to_process[:max_concurrent]):
+                chapter_index = start_index + i
+                chapter_url = chapter.get("url")
+                if not chapter_url:
+                    logger.warning(f"章节 {chapter_index} 没有URL")
+                    continue
+                    
+                # 确保URL是完整的
+                full_chapter_url = chapter_url if chapter_url.startswith('http') else urljoin(self.state["current_url"], chapter_url)
+                tasks.append(self.process_chapter_with_apify(chapter_index, full_chapter_url))
+                
+            # 等待所有任务完成
+            results = await asyncio.gather(*tasks)
+            
+            # 处理结果
+            chapters_content = [r for r in results if r]
+            logger.info(f"成功并行处理了 {len(chapters_content)} 个章节")
+            
+            # 更新当前章节索引
+            if chapters_content:
+                max_index = max([c["index"] for c in chapters_content])
+                self.state["current_chapter"] = max_index + 1
+                
+            return len(chapters_content)
         
-        # 为每个章节创建单独的页面
-        pages = []
-        for i in range(max_concurrent):
-            try:
-                page = await self.context.new_page()
-                # 设置更长的超时时间
-                page.set_default_navigation_timeout(60000)  # 60秒
-                page.set_default_timeout(60000)  # 60秒
-                pages.append(page)
-                logger.info(f"成功创建页面 {i+1}/{max_concurrent}")
-            except Exception as e:
-                logger.error(f"创建新页面失败: {e}")
-                # 如果创建页面失败，关闭已创建的页面
-                for p in pages:
-                    await p.close()
-                return
-                
-        if not pages:
-            logger.error("没有成功创建任何页面，无法并行处理")
-            return
-            
-        # 并行访问章节
-        async def process_chapter(index, chapter, page):
-            chapter_index = start_index + index
-            chapter_url = chapter.get("url")
-            
-            if not chapter_url:
-                logger.warning(f"章节 {chapter_index} 没有URL")
-                return None
-                
-            # 添加重试机制
-            max_retries = 3
-            retry_count = 0
-            
-            while retry_count < max_retries:
+        # 使用Playwright处理章节
+        else:
+            # 确保浏览器上下文已初始化
+            if not hasattr(self, 'context') or self.context is None:
+                logger.info("浏览器上下文未初始化，正在初始化...")
                 try:
-                    # 确保URL是完整的
-                    full_chapter_url = chapter_url if chapter_url.startswith('http') else urljoin(self.base_url, chapter_url)
+                    await self.init_browser()
+                except Exception as e:
+                    logger.error(f"初始化浏览器失败: {e}")
+                    return 0
+            
+            # 设置并发限制
+            max_concurrent = min(3, len(chapters_to_process))  # 最多同时处理3个章节
+            logger.info(f"设置最大并发数为: {max_concurrent}")
+            
+            # 为每个章节创建单独的页面
+            pages = []
+            for i in range(max_concurrent):
+                try:
+                    page = await self.context.new_page()
+                    # 设置更长的超时时间
+                    page.set_default_navigation_timeout(60000)  # 60秒
+                    page.set_default_timeout(60000)  # 60秒
+                    pages.append(page)
+                    logger.info(f"成功创建页面 {i+1}/{max_concurrent}")
+                except Exception as e:
+                    logger.error(f"创建新页面失败: {e}")
+                    # 如果创建页面失败，关闭已创建的页面
+                    for p in pages:
+                        await p.close()
+                    return 0
                     
-                    # 访问章节页面
-                    await page.goto(full_chapter_url, timeout=60000)  # 60秒超时
-                    await page.wait_for_load_state('networkidle', timeout=60000)  # 60秒超时
+            if not pages:
+                logger.error("没有成功创建任何页面，无法并行处理")
+                return 0
+                
+            # 创建任务并等待结果
+            tasks = []
+            for i, (chapter, page) in enumerate(zip(chapters_to_process, pages)):
+                tasks.append(self.process_chapter_with_playwright(start_index + i, chapter, page))
+                
+            results = await asyncio.gather(*tasks)
+            
+            # 关闭页面
+            for page in pages:
+                await page.close()
+                
+            # 处理结果
+            chapters_content = [r for r in results if r]
+            logger.info(f"成功并行处理了 {len(chapters_content)} 个章节")
+            
+            # 更新当前章节索引
+            if chapters_content:
+                max_index = max([c["index"] for c in chapters_content])
+                self.state["current_chapter"] = max_index + 1
+                
+            return len(chapters_content)
+                
+    async def process_chapter_with_apify(self, chapter_index, chapter_url):
+        """使用Apify处理单个章节"""
+        # 添加重试机制
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                # 使用Apify获取页面内容
+                logger.info(f"使用Apify获取章节 {chapter_index+1} 内容: {chapter_url}")
+                html_content = await self.apify_scrape(chapter_url)
+                if not html_content:
+                    logger.error(f"使用Apify获取章节 {chapter_index+1} 内容失败")
+                    retry_count += 1
+                    if retry_count < max_retries:
+                        wait_time = retry_count * 2  # 指数退避
+                        logger.info(f"等待 {wait_time} 秒后重试...")
+                        await asyncio.sleep(wait_time)
+                    continue
+                
+                # 尝试DOM提取章节内容
+                dom_result = await self.extract_chapter_content_from_dom(html_content)
+                if dom_result["is_complete"]:
+                    chapter_title = dom_result["title"]
+                    chapter_content = dom_result["content"]
+                    is_complete = True
                     
-                    # 获取页面内容
-                    html = await page.content()
+                    # 保存到数据库和文件处理
+                    if self.state["novel_id"]:
+                        chapter_data = {
+                            "novel_id": self.state["novel_id"],
+                            "chapter_index": chapter_index,
+                            "title": chapter_title,
+                            "content": chapter_content,
+                            "url": chapter_url,
+                            "is_complete": is_complete,
+                            "word_count": len(chapter_content),
+                            "created_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        }
+                        
+                        db_logger.info(f"保存章节 #{chapter_index+1} 到数据库")
+                        self.db.save_chapter(chapter_data)
+                        
+                        # 如果指定了本地存储，保存到文件
+                        if STORAGE_CONFIG.get('save_to_file', False):
+                            file_path = self.save_to_file(
+                                self.state["novel_title"], 
+                                chapter_index,
+                                chapter_title,
+                                chapter_content
+                            )
+                            logger.info(f"章节已保存到文件: {file_path}")
                     
-                    # 提取章节内容
-                    chapter_title, chapter_content, is_complete = await self.fetch_chapter_content(full_chapter_url, chapter_index)
+                    return {
+                        "index": chapter_index,
+                        "title": chapter_title,
+                        "content": chapter_content,
+                        "url": chapter_url,
+                        "is_complete": is_complete
+                    }
+                
+                logger.warning(f"章节 {chapter_index+1} 内容提取失败")
+                retry_count += 1
+                if retry_count < max_retries:
+                    wait_time = retry_count * 2
+                    logger.info(f"等待 {wait_time} 秒后重试...")
+                    await asyncio.sleep(wait_time)
+                
+            except Exception as e:
+                logger.error(f"处理章节 {chapter_index+1} 时发生错误: {e}")
+                retry_count += 1
+                if retry_count < max_retries:
+                    wait_time = retry_count * 2
+                    logger.info(f"等待 {wait_time} 秒后重试...")
+                    await asyncio.sleep(wait_time)
+                
+        return None
+    
+    async def process_chapter_with_playwright(self, chapter_index, chapter, page):
+        """使用Playwright处理单个章节"""
+        chapter_url = chapter.get("url")
+        
+        if not chapter_url:
+            logger.warning(f"章节 {chapter_index} 没有URL")
+            return None
+            
+        # 添加重试机制
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                # 确保URL是完整的
+                full_chapter_url = chapter_url if chapter_url.startswith('http') else urljoin(self.state["current_url"], chapter_url)
+                
+                # 使用Playwright获取页面内容
+                await page.goto(full_chapter_url, timeout=60000)  # 60秒超时
+                await page.wait_for_load_state('networkidle', timeout=60000)  # 60秒超时
+                html_content = await page.content()
+                
+                # 尝试DOM提取章节内容
+                dom_result = await self.extract_chapter_content_from_dom(html_content)
+                if dom_result["is_complete"]:
+                    chapter_title = dom_result["title"]
+                    chapter_content = dom_result["content"]
+                    is_complete = True
                     
-                    if chapter_content:
-                        return {
-                            "index": chapter_index,
+                    # 保存到数据库和文件处理
+                    if self.state["novel_id"]:
+                        chapter_data = {
+                            "novel_id": self.state["novel_id"],
+                            "chapter_index": chapter_index,
                             "title": chapter_title,
                             "content": chapter_content,
                             "url": full_chapter_url,
-                            "is_complete": is_complete
+                            "is_complete": is_complete,
+                            "word_count": len(chapter_content),
+                            "created_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         }
                         
-                    logger.warning(f"章节 {chapter_index} 内容提取失败")
-                    retry_count += 1
-                    if retry_count < max_retries:
-                        logger.info(f"等待 {retry_count * 2} 秒后重试...")
-                        await asyncio.sleep(retry_count * 2)
+                        db_logger.info(f"保存章节 #{chapter_index+1} 到数据库")
+                        self.db.save_chapter(chapter_data)
+                        
+                        # 如果指定了本地存储，保存到文件
+                        if STORAGE_CONFIG.get('save_to_file', False):
+                            file_path = self.save_to_file(
+                                self.state["novel_title"], 
+                                chapter_index,
+                                chapter_title,
+                                chapter_content
+                            )
+                            logger.info(f"章节已保存到文件: {file_path}")
                     
-                except Exception as e:
-                    logger.error(f"处理章节 {chapter_index} 时发生错误: {e}")
-                    retry_count += 1
-                    if retry_count < max_retries:
-                        logger.info(f"等待 {retry_count * 2} 秒后重试...")
-                        await asyncio.sleep(retry_count * 2)
-                    
-            return None
+                    return {
+                        "index": chapter_index,
+                        "title": chapter_title,
+                        "content": chapter_content,
+                        "url": full_chapter_url,
+                        "is_complete": is_complete
+                    }
                 
-        # 创建任务并等待结果
-        tasks = []
-        for i, (chapter, page) in enumerate(zip(chapters_to_process, pages)):
-            tasks.append(process_chapter(i, chapter, page))
-            
-        results = await asyncio.gather(*tasks)
-        
-        # 关闭页面
-        for page in pages:
-            await page.close()
-            
-        # 处理结果
-        chapters_content = [r for r in results if r]
-        logger.info(f"成功并行处理了 {len(chapters_content)} 个章节")
-        
-        # 更新当前章节索引
-        if chapters_content:
-            max_index = max([c["index"] for c in chapters_content])
-            self.state["current_chapter"] = max_index + 1
-            
-        return len(chapters_content)
+                logger.warning(f"章节 {chapter_index} 内容提取失败")
+                retry_count += 1
+                if retry_count < max_retries:
+                    logger.info(f"等待 {retry_count * 2} 秒后重试...")
+                    await asyncio.sleep(retry_count * 2)
+                
+            except Exception as e:
+                logger.error(f"处理章节 {chapter_index} 时发生错误: {e}")
+                retry_count += 1
+                if retry_count < max_retries:
+                    logger.info(f"等待 {retry_count * 2} 秒后重试...")
+                    await asyncio.sleep(retry_count * 2)
+                
+        return None
 
     async def extract_chapter_links_from_dom(self, page):
         """从DOM中提取章节链接，使用DOM预处理和大模型处理结合的方式"""
@@ -1013,9 +1183,12 @@ class NovelCrawler:
             # 获取页面HTML
             html_content = await page.content()
             
+            # 获取当前页面URL
+            current_url = page.url
+            
             # 使用DOM预处理提取结构化数据
             logger.info("使用DOM预处理提取章节数据...")
-            extracted_data = await self.extract_data_from_dom(html_content, "chapter_list")
+            extracted_data = await self.extract_data_from_dom(html_content, "chapter_list", base_url=current_url)
             
             # 如果DOM预处理成功提取到足够章节，直接使用
             dom_chapters = extracted_data.get("chapters", [])
@@ -1037,7 +1210,7 @@ class NovelCrawler:
                                 
                                 # 重新获取页面内容并提取
                                 html_content = await page.content()
-                                extracted_data = await self.extract_data_from_dom(html_content, "chapter_list")
+                                extracted_data = await self.extract_data_from_dom(html_content, "chapter_list", base_url=current_url)
                                 dom_chapters = extracted_data.get("chapters", [])
                                 logger.info(f"点击展开按钮后，提取到 {len(dom_chapters)} 个章节")
                             except Exception as e:
@@ -1051,10 +1224,18 @@ class NovelCrawler:
                 # 更新状态
                 self.state["novel_title"] = novel_title
                 self.state["author"] = novel_author
+                self.state["current_url"] = current_url  # 更新当前URL
                 
-                # 构建章节列表文本
-                chapters_text = "\n".join([f"{i+1}. {chapter['title']} - {chapter['url']}" 
-                                     for i, chapter in enumerate(dom_chapters)])
+                # 构建章节列表文本并转换所有相对URL为绝对URL
+                chapters_text_parts = []
+                for i, chapter in enumerate(dom_chapters):
+                    chapter_url = chapter.get('url', '')
+                    # 确保章节URL是绝对URL
+                    full_url = chapter_url if chapter_url.startswith('http') else urljoin(current_url, chapter_url)
+                    chapter['url'] = full_url  # 更新为绝对URL
+                    chapters_text_parts.append(f"{i+1}. {chapter['title']} - {full_url}")
+                
+                chapters_text = "\n".join(chapters_text_parts)
                 
                 # 构建结构化数据
                 structured_data = f"""网站标题: {novel_title}
@@ -1177,7 +1358,7 @@ class NovelCrawler:
             logger.error(traceback.format_exc())
             return [], "", ""
 
-    async def extract_data_from_dom(self, html, page_type="unknown"):
+    async def extract_data_from_dom(self, html, page_type="unknown", base_url=None):
         """使用DOM预处理从HTML中提取结构化数据"""
         soup = BeautifulSoup(html, 'html.parser')
         result = {}
@@ -1220,7 +1401,7 @@ class NovelCrawler:
             
             # 如果还没找到标题，尝试从URL中提取
             if not result.get("title"):
-                url_match = re.search(r'/([^/]+)/?$', self.base_url)
+                url_match = re.search(r'/([^/]+)/?$', base_url)
                 if url_match:
                     result["title"] = url_match.group(1)
                     logger.info(f"从URL提取标题: {result['title']}")

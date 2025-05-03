@@ -35,6 +35,10 @@ def parse_arguments():
                         default='INFO', help='日志级别：DEBUG(调试)/INFO(信息)/WARNING(警告)/ERROR(错误)')
     parser.add_argument('--quiet', action='store_true',
                         help='安静模式，只输出错误信息')
+    parser.add_argument('--use-apify', action='store_true', default=CRAWLER_CONFIG.get('use_apify', False),
+                        help='是否使用Apify爬取网页内容，默认根据配置文件设置')
+    parser.add_argument('--no-apify', action='store_true', 
+                        help='禁用Apify，强制使用Playwright爬取')
     
     return parser.parse_args()
 
@@ -89,6 +93,15 @@ async def main():
     crawler.skip_images = args.skip_images
     crawler.enable_js_blocking = args.block_ads
     
+    # 设置是否使用Apify
+    if args.no_apify:
+        crawler.use_apify = False
+        print("[Python] [配置] 禁用Apify，使用Playwright爬取")
+    elif args.use_apify:
+        crawler.use_apify = True
+        crawler.enable_apify()  # 确保Apify客户端被初始化
+        print("[Python] [配置] 启用Apify爬取")
+    
     # 设置要爬取的小说URL
     novel_url = args.url
     
@@ -104,6 +117,7 @@ async def main():
         print(f"[Shell] [运行] 页面超时: {args.timeout}ms")
         print(f"[Shell] [运行] 跳过图片: {'是' if args.skip_images else '否'}")
         print(f"[Shell] [运行] 阻止广告: {'是' if args.block_ads else '否'}")
+        print(f"[Shell] [运行] 使用Apify: {'是' if crawler.use_apify else '否'}")
         
         await crawler.crawl_novel(novel_url, limit_chapters)
     except Exception as e:

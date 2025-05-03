@@ -107,6 +107,71 @@ class ApifyCloudflareScraper:
             logger.error(f"解析章节内容时发生错误: {e}")
             return {'title': '', 'content': ''}
 
+async def test_apify_complete_process():
+    """测试完整的小说爬取流程：获取章节列表和多个章节内容"""
+    novel_url = "https://www.hetushu.com/book/387/index.html"
+    scraper = ApifyCloudflareScraper()
+    
+    # 1. 首先获取章节列表
+    try:
+        logger.info("第1步: 获取小说章节列表")
+        html_content = await scraper.scrape(novel_url)
+        if not html_content:
+            logger.error("获取章节列表失败")
+            return
+            
+        chapters = scraper.parse_chapters(html_content, novel_url)
+        logger.info(f"成功获取到 {len(chapters)} 个章节")
+        
+        if not chapters:
+            logger.error("未能获取到章节列表")
+            return
+            
+        # 展示前5个章节
+        logger.info("章节列表示例(前5章):")
+        for i, chapter in enumerate(chapters[:5]):
+            logger.info(f"{i+1}. {chapter['title']} - {chapter['url']}")
+        
+        # 2. 选择前3个章节获取内容
+        max_chapters = min(3, len(chapters))
+        logger.info(f"\n第2步: 获取前 {max_chapters} 个章节的内容")
+        
+        for i in range(max_chapters):
+            chapter = chapters[i]
+            logger.info(f"\n开始获取第 {i+1} 章: {chapter['title']}")
+            
+            # 获取章节内容
+            chapter_content_html = await scraper.scrape(chapter['url'])
+            if not chapter_content_html:
+                logger.error(f"获取章节 {i+1} 内容失败")
+                continue
+                
+            # 解析章节内容
+            result = scraper.parse_chapter_content(chapter_content_html)
+            logger.info(f"章节标题: {result['title']}")
+            
+            # 显示前200字节内容
+            content_preview = result['content'][:200] + "..." if len(result['content']) > 200 else result['content']
+            logger.info(f"章节内容预览:\n{content_preview}")
+            
+            # 简单验证
+            assert result['title'], "未能提取到章节标题"
+            assert result['content'], "未能提取到章节内容"
+            
+            # 将文件保存到测试目录
+            os.makedirs("test_output", exist_ok=True)
+            filename = f"test_output/章节{i+1}-{result['title']}.txt"
+            try:
+                with open(filename, "w", encoding="utf-8") as f:
+                    f.write(result['content'])
+                logger.info(f"章节内容已保存到: {filename}")
+            except Exception as e:
+                logger.error(f"保存章节内容到文件失败: {e}")
+        
+        logger.info("\n测试完成!")
+    except Exception as e:
+        logger.error(f"测试过程中发生错误: {e}")
+
 async def test_apify_scraper():
     url = "https://www.hetushu.com/book/387/index.html"
     scraper = ApifyCloudflareScraper()
@@ -144,4 +209,5 @@ async def test_apify_chapter_content():
 
 if __name__ == "__main__":
     # asyncio.run(test_apify_scraper())
-    asyncio.run(test_apify_chapter_content()) 
+    # asyncio.run(test_apify_chapter_content())
+    asyncio.run(test_apify_complete_process()) 

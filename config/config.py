@@ -52,6 +52,7 @@ CRAWLER_CONFIG = {
     'retry_limit': 3,         # 重试次数
     'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36',
     'use_claude': False,      # 是否优先使用Claude，默认使用DeepSeek
+    'use_apify': False,       # 是否使用Apify获取网页内容代替Playwright，默认不使用
     'compress_html': False,   # 是否压缩HTML
     'cache_enabled': True,    # 是否启用缓存
     'cache_ttl': 86400,       # 缓存有效期（秒）
@@ -59,7 +60,7 @@ CRAWLER_CONFIG = {
     'output_dir': 'output',   # 输出目录
     'max_novels': 100,        # 最大小说数量限制
     'max_chapters': 10000,     # 最大章节数量限制
-    'base_url': 'https://www.bqgl.cc/look/9695/',  # 默认测试URL
+    'base_url': 'https://www.hetushu.com/book/4917/index.html',  # 默认测试URL
     'headers': {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
@@ -128,7 +129,7 @@ USE_APIFY = True  # True=使用Apify，False=本地Playwright
 
 # Apify配置
 APIFY_CONFIG = {
-    'api_token': os.getenv('APIFY_API_TOKEN'),
+    'api_token': os.getenv('APIFY_TOKEN'),
     'actor_id': 'ChNuXurElMWvpbJB9',  # Cloudflare Web Scraper 的 Actor ID
     'proxy_groups': ['RESIDENTIAL'],  # 使用住宅代理
     'js_timeout': 30,  # JavaScript 执行超时时间（秒）
