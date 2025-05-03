@@ -1,0 +1,32 @@
+[
+  {
+    "name": "cf_clearance",
+    "value": "SllujM9aRWCOz6qaqAy7JTS2Zxtw8cMjTTBJGPAHGqg-1746184682-1.2.1.1-5w_R8Nym2kTtbluHYRutlOFrNQngxU7y9.bMwacB6s4eJOJ0qEVlzqSo_xQlLuP8k2VfSfqoWmYLT_DTh.EbiP2xJvB.wniRceg8JEryqUtlt5CXFgImnsu0g4i7kjDg_nQ.es.mGoDvrk7EilWR4OTT_Ac.TFU1HJIGAZC.XMKjGsC_hJcNGvkHVPCuWg5zwj46A9WNIEcNAq8m4FzaAtt.b075vp.ShhUHRpTPx6d6xqWUJcwSTVgNVuwDDr561jzeXD97HZG6Eelp9pB7mBCl6YdQOd0HnOyOumF7CXYWDO0tOUVFHmM0UGuGC5Jyv2y3E7WAuNW7QTRFY2jYHolK.SU74nIobhdwt2x1s3MSC7Gqfo6.NBzedMoCfXHl",
+    "domain": ".hetushu.com",
+    "path": "/",
+    "expires": 1777720682,
+    "httpOnly": true,
+    "secure": true,
+    "sameSite": "None"
+  },
+  {
+    "name": "_ga",
+    "value": "GA1.1.46547820.1746184683",
+    "domain": ".hetushu.com",
+    "path": "/",
+    "expires": 1809256683,
+    "httpOnly": false,
+    "secure": false,
+    "sameSite": "None"
+  },
+  {
+    "name": "_ga_333KCL0K1B",
+    "value": "GS1.1.1746184683.1.1.1746184697.0.0.0",
+    "domain": ".hetushu.com",
+    "path": "/",
+    "expires": 1809256697,
+    "httpOnly": false,
+    "secure": false,
+    "sameSite": "None"
+  }
+]

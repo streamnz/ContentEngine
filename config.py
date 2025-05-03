@@ -59,7 +59,7 @@ CRAWLER_CONFIG = {
     'output_dir': 'output',   # 输出目录
     'max_novels': 100,        # 最大小说数量限制
     'max_chapters': 1000,     # 最大章节数量限制
-    'base_url': 'https://www.bqgl.cc/look/52359/',  # 默认测试URL
+    'base_url': 'https://www.bqgl.cc/look/9695/',  # 默认测试URL
     'headers': {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
@@ -70,7 +70,8 @@ CRAWLER_CONFIG = {
 
 # 本地存储配置
 STORAGE_CONFIG = {
-    'base_path': 'novels'  # 小说存储的基础路径
+    'base_path': 'novels',  # 小说存储的基础路径
+    'save_to_file': True    # 是否保存到本地文件
 }
 
 # 提示词模板 - 使用字符串协议定义
@@ -117,4 +118,13 @@ PROMPT_TEMPLATES = {
 处理完成后，请在最后添加：
 <<<PROCESSING_COMPLETE>>>
     """
-} 
+}
+
+# Cookie配置（可选）
+COOKIES = []
+
+# 是否使用 Apify 平台
+USE_APIFY = True  # True=使用Apify，False=本地Playwright 
+
+# Apify API Token
+APIFY_API_TOKEN = "apify_api_gXcR5utLXbObk3xaDgzFeZSfUiQ8Nv3oV5P6"  # 你的Apify Token 
