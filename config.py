@@ -58,7 +58,7 @@ CRAWLER_CONFIG = {
     'log_level': 'INFO',      # 日志级别
     'output_dir': 'output',   # 输出目录
     'max_novels': 100,        # 最大小说数量限制
-    'max_chapters': 1000,     # 最大章节数量限制
+    'max_chapters': 10000,     # 最大章节数量限制
     'base_url': 'https://www.bqgl.cc/look/9695/',  # 默认测试URL
     'headers': {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36',

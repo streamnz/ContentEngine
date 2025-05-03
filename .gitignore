@@ -51,3 +51,6 @@ playwright/.local-browsers/
 # Project specific
 novels/
 *.txt 
+
+chrome-profile-playwright/
+firefox-profile-playwright/
