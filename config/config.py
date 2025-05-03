@@ -70,7 +70,7 @@ CRAWLER_CONFIG = {
 
 # 本地存储配置
 STORAGE_CONFIG = {
-    'base_path': 'novels',  # 小说存储的基础路径
+    'base_path': 'data/novels',  # 小说存储的基础路径
     'save_to_file': True    # 是否保存到本地文件
 }
 

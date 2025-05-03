@@ -10,8 +10,8 @@ import json
 import re
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
-from claude_client import ClaudeClient
-from deepseek_client import DeepSeekClient
+from ai_client.claude_client import ClaudeClient
+from ai_client.deepseek_client import DeepSeekClient
 import anthropic
 from openai import OpenAI
 from config import DEEPSEEK_CONFIG, CLAUDE_CONFIG

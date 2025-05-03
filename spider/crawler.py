@@ -8,9 +8,9 @@ import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
 from playwright.async_api import async_playwright
-from database import Database
-from deepseek_client import DeepSeekClient
-from claude_client import ClaudeClient
+from database.database import Database
+from ai_client.deepseek_client import DeepSeekClient
+from ai_client.claude_client import ClaudeClient
 from config import CRAWLER_CONFIG, PROMPT_TEMPLATES, STORAGE_CONFIG, COOKIES
 from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup

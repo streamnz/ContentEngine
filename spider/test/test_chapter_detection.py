@@ -3,7 +3,7 @@ import logging
 import re
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
-from crawler import NovelCrawler, setup_logging
+from spider.crawler import NovelCrawler, setup_logging
 from config import CRAWLER_CONFIG
 
 # 配置日志记录
