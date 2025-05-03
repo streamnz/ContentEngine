@@ -126,5 +126,11 @@ COOKIES = []
 # 是否使用 Apify 平台
 USE_APIFY = True  # True=使用Apify，False=本地Playwright 
 
-# Apify API Token
-APIFY_API_TOKEN = "apify_api_gXcR5utLXbObk3xaDgzFeZSfUiQ8Nv3oV5P6"  # 你的Apify Token 
+# Apify配置
+APIFY_CONFIG = {
+    'api_token': os.getenv('APIFY_API_TOKEN'),
+    'actor_id': 'ChNuXurElMWvpbJB9',  # Cloudflare Web Scraper 的 Actor ID
+    'proxy_groups': ['RESIDENTIAL'],  # 使用住宅代理
+    'js_timeout': 30,  # JavaScript 执行超时时间（秒）
+    'max_retries': 3,  # 最大重试次数
+} 
