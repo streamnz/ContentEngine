@@ -63,6 +63,64 @@ class Database:
         )
         """)
         
+        # 创建抖音视频表
+        self.cursor.execute("""
+        CREATE TABLE IF NOT EXISTS douyin_video (
+            id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键ID',
+            douyin_id VARCHAR(64) COMMENT '抖音视频ID',
+            unique_id VARCHAR(64) COMMENT '抖音作者唯一ID',
+            author VARCHAR(255) COMMENT '作者昵称',
+            title VARCHAR(512) COMMENT '视频标题',
+            thumbnail_url VARCHAR(1024) COMMENT '封面图URL',
+            duration INT COMMENT '视频时长（毫秒）',
+            source_url VARCHAR(1024) NOT NULL COMMENT '原始抖音URL',
+            source_url_hash CHAR(32) GENERATED ALWAYS AS (MD5(source_url)) STORED COMMENT '原始URL的MD5哈希',
+            video_dir VARCHAR(1024) COMMENT '本地视频文件目录',
+            video_path VARCHAR(1024) COMMENT '本地视频文件路径',
+            audio_dir VARCHAR(1024) COMMENT '本地音频文件目录',
+            audio_path VARCHAR(1024) COMMENT '本地音频文件路径',
+            audio_text LONGTEXT COMMENT '音频转文字内容',
+            status VARCHAR(32) DEFAULT 'pending' COMMENT '下载状态(pending/downloading/completed/failed)',
+            error_message VARCHAR(1024) COMMENT '失败原因',
+            content JSON COMMENT '完整响应内容',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+            UNIQUE KEY (source_url_hash)
+        )
+        """)
+        
+        # 创建抖音视频与小说关联表（多对多关系）
+        self.cursor.execute("""
+        CREATE TABLE IF NOT EXISTS douyin_video_novel (
+            id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键ID',
+            douyin_video_id BIGINT NOT NULL COMMENT '抖音视频ID',
+            novel_id BIGINT COMMENT '小说ID',
+            novel_name VARCHAR(255) NOT NULL COMMENT '小说名称',
+            confidence FLOAT DEFAULT 0 COMMENT 'AI识别置信度',
+            summary TEXT COMMENT '关于该小说的内容描述',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+            FOREIGN KEY (douyin_video_id) REFERENCES douyin_video(id) ON DELETE CASCADE,
+            FOREIGN KEY (novel_id) REFERENCES novel(id) ON DELETE SET NULL,
+            UNIQUE KEY (douyin_video_id, novel_name)
+        ) COMMENT='抖音视频与小说关联表'
+        """)
+        
+        # 创建待收录小说表
+        self.cursor.execute("""
+        CREATE TABLE IF NOT EXISTS to_do_novel (
+            id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键ID',
+            novel_name VARCHAR(255) NOT NULL COMMENT '小说名称',
+            douyin_video_id BIGINT COMMENT '关联的抖音视频ID',
+            recommendation_reason TEXT COMMENT '推荐原因（视频中的描述）',
+            status VARCHAR(32) DEFAULT 'pending' COMMENT '状态(pending/ignored/added)',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+            UNIQUE KEY (novel_name),
+            FOREIGN KEY (douyin_video_id) REFERENCES douyin_video(id) ON DELETE SET NULL
+        ) COMMENT='待收录小说表'
+        """)
+        
         # 检查novel_category表是否为空，如果为空则插入默认分类
         self.cursor.execute("SELECT COUNT(*) FROM novel_category")
         count = self.cursor.fetchone()[0]
@@ -92,6 +150,374 @@ class Database:
         self.cursor.close()
         self.connection.close()
         db_logger.info("数据库连接已关闭")
+
+    # === 抖音视频相关方法 ===
+    
+    def insert_douyin_video(self, source_url, douyin_id=None, unique_id=None, author=None, title=None, 
+                          thumbnail_url=None, duration=None, content=None):
+        """插入抖音视频记录
+        
+        Args:
+            source_url: 抖音视频URL (必填)
+            douyin_id: 抖音视频ID
+            unique_id: 抖音作者唯一ID
+            author: 作者昵称
+            title: 视频标题
+            thumbnail_url: 封面图片URL
+            duration: 视频时长(毫秒)
+            content: 完整响应内容(JSON)
+            
+        Returns:
+            记录ID，如果插入失败则返回None
+        """
+        try:
+            # 检查是否已存在相同URL的记录
+            sql = "SELECT id FROM douyin_video WHERE source_url = %s"
+            self.cursor.execute(sql, (source_url,))
+            existing_record = self.cursor.fetchone()
+            
+            if existing_record:
+                db_logger.info(f"已存在相同URL的视频记录: {source_url}, ID: {existing_record[0]}")
+                return existing_record[0]
+            
+            # 处理JSON内容
+            content_json = json.dumps(content, ensure_ascii=False) if content else None
+            
+            # 准备插入数据
+            sql = """
+            INSERT INTO douyin_video (
+                douyin_id, unique_id, author, title, thumbnail_url,
+                duration, source_url, status, content
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+            
+            values = (
+                douyin_id, unique_id, author, title, thumbnail_url,
+                duration, source_url, 'pending', content_json
+            )
+            
+            self.cursor.execute(sql, values)
+            self.connection.commit()
+            
+            video_id = self.cursor.lastrowid
+            db_logger.info(f"成功插入抖音视频记录: ID {video_id}, URL: {source_url}")
+            return video_id
+            
+        except Exception as e:
+            db_logger.error(f"插入抖音视频记录失败: {str(e)}")
+            self.connection.rollback()
+            return None
+
+    def update_douyin_video_status(self, douyin_id, status, video_path=None, audio_path=None, 
+                                 video_dir=None, audio_dir=None, error_message=None, audio_text=None):
+        """更新抖音视频状态
+        
+        Args:
+            douyin_id: 抖音视频ID
+            status: 状态 (pending/downloading/completed/failed)
+            video_path: 视频文件路径
+            audio_path: 音频文件路径
+            video_dir: 视频文件目录
+            audio_dir: 音频文件目录
+            error_message: 错误信息
+            audio_text: 音频转写文本
+            
+        Returns:
+            是否更新成功
+        """
+        try:
+            update_fields = ["status = %s"]
+            update_values = [status]
+            
+            if video_path is not None:
+                update_fields.append("video_path = %s")
+                update_values.append(video_path)
+                
+            if audio_path is not None:
+                update_fields.append("audio_path = %s")
+                update_values.append(audio_path)
+                
+            if video_dir is not None:
+                update_fields.append("video_dir = %s")
+                update_values.append(video_dir)
+                
+            if audio_dir is not None:
+                update_fields.append("audio_dir = %s")
+                update_values.append(audio_dir)
+                
+            if error_message is not None:
+                update_fields.append("error_message = %s")
+                update_values.append(error_message)
+                
+            if audio_text is not None:
+                update_fields.append("audio_text = %s")
+                update_values.append(audio_text)
+            
+            # 更新时间戳
+            update_fields.append("updated_at = NOW()")
+            
+            # 构建SQL
+            sql = f"""
+            UPDATE douyin_video 
+            SET {', '.join(update_fields)}
+            WHERE douyin_id = %s
+            """
+            
+            update_values.append(douyin_id)
+            self.cursor.execute(sql, tuple(update_values))
+            self.connection.commit()
+            
+            affected_rows = self.cursor.rowcount
+            if affected_rows > 0:
+                db_logger.info(f"更新抖音视频状态成功: ID {douyin_id}, 状态: {status}")
+                return True
+            else:
+                db_logger.warning(f"未找到抖音视频记录: ID {douyin_id}")
+                return False
+                
+        except Exception as e:
+            db_logger.error(f"更新抖音视频状态失败: {str(e)}")
+            self.connection.rollback()
+            return False
+
+    def get_douyin_video_by_id(self, douyin_id):
+        """根据抖音ID获取视频信息
+        
+        Args:
+            douyin_id: 抖音视频ID
+            
+        Returns:
+            视频记录，如果不存在则返回None
+        """
+        try:
+            sql = "SELECT * FROM douyin_video WHERE douyin_id = %s"
+            self.cursor.execute(sql, (douyin_id,))
+            result = self.cursor.fetchone()
+            
+            if result:
+                db_logger.info(f"查询抖音视频成功: ID {douyin_id}")
+            else:
+                db_logger.warning(f"未找到抖音视频: ID {douyin_id}")
+                
+            return result
+            
+        except Exception as e:
+            db_logger.error(f"查询抖音视频失败: {str(e)}")
+            return None
+
+    def get_douyin_video_by_url(self, url):
+        """根据URL获取视频信息
+        
+        Args:
+            url: 抖音视频URL
+            
+        Returns:
+            视频记录，如果不存在则返回None
+        """
+        try:
+            sql = "SELECT * FROM douyin_video WHERE source_url = %s"
+            self.cursor.execute(sql, (url,))
+            result = self.cursor.fetchone()
+            
+            if result:
+                db_logger.info(f"查询抖音视频成功: URL {url}")
+            else:
+                db_logger.warning(f"未找到抖音视频: URL {url}")
+                
+            return result
+            
+        except Exception as e:
+            db_logger.error(f"查询抖音视频失败: {str(e)}")
+            return None
+
+    def get_pending_douyin_videos(self, limit=10):
+        """获取待下载的抖音视频列表
+        
+        Args:
+            limit: 限制返回数量
+            
+        Returns:
+            待下载视频列表
+        """
+        try:
+            sql = """
+            SELECT * FROM douyin_video 
+            WHERE status = 'pending'
+            ORDER BY created_at ASC
+            LIMIT %s
+            """
+            
+            self.cursor.execute(sql, (limit,))
+            results = self.cursor.fetchall()
+            
+            db_logger.info(f"查询待下载抖音视频: 返回 {len(results)} 条记录")
+            return results
+            
+        except Exception as e:
+            db_logger.error(f"查询待下载抖音视频失败: {str(e)}")
+            return []
+            
+    def insert_douyin_video_novel(self, douyin_video_id, novel_id, novel_name, confidence=0, summary=""):
+        """插入抖音视频与小说关联记录（支持多对多关联）
+        
+        Args:
+            douyin_video_id: 抖音视频表ID
+            novel_id: 小说表ID（可为空，AI未识别到时为NULL）
+            novel_name: AI识别出的小说名称
+            confidence: AI识别置信度
+            summary: 关于该小说的内容描述
+            
+        Returns:
+            记录ID，如果插入失败则返回None
+        """
+        try:
+            # 检查是否已存在相同视频ID和小说名称的记录
+            sql = "SELECT id FROM douyin_video_novel WHERE douyin_video_id = %s AND novel_name = %s"
+            self.cursor.execute(sql, (douyin_video_id, novel_name))
+            existing_record = self.cursor.fetchone()
+            
+            if existing_record:
+                db_logger.info(f"已存在相同视频ID和小说名称的关联记录: 视频ID {douyin_video_id}, 小说 {novel_name}, 记录ID: {existing_record[0]}")
+                return existing_record[0]
+            
+            # 准备插入数据
+            sql = """
+            INSERT INTO douyin_video_novel (
+                douyin_video_id, novel_id, novel_name, confidence, summary
+            ) VALUES (%s, %s, %s, %s, %s)
+            """
+            
+            values = (
+                douyin_video_id, novel_id, novel_name, confidence, summary
+            )
+            
+            self.cursor.execute(sql, values)
+            self.connection.commit()
+            
+            record_id = self.cursor.lastrowid
+            db_logger.info(f"成功插入抖音视频与小说关联记录: ID {record_id}, 视频ID: {douyin_video_id}, 小说: {novel_name}")
+            
+            # 检查是否需要添加到待收录小说表
+            if not novel_id:
+                self.insert_to_do_novel(novel_name, douyin_video_id, summary)
+            
+            return record_id
+            
+        except Exception as e:
+            db_logger.error(f"插入抖音视频与小说关联记录失败: {str(e)}")
+            self.connection.rollback()
+            return None
+            
+    def update_douyin_video_novel(self, id, novel_id=None, novel_name=None, confidence=None, summary=None):
+        """更新抖音视频与小说关联记录
+        
+        Args:
+            id: 关联记录ID
+            novel_id: 小说表ID（可为空）
+            novel_name: 小说名称
+            confidence: AI识别置信度
+            summary: 关于该小说的内容描述
+            
+        Returns:
+            是否更新成功
+        """
+        try:
+            update_fields = []
+            update_values = []
+            
+            if novel_id is not None:
+                update_fields.append("novel_id = %s")
+                update_values.append(novel_id)
+                
+            if novel_name is not None:
+                update_fields.append("novel_name = %s")
+                update_values.append(novel_name)
+                
+            if confidence is not None:
+                update_fields.append("confidence = %s")
+                update_values.append(confidence)
+                
+            if summary is not None:
+                update_fields.append("summary = %s")
+                update_values.append(summary)
+            
+            # 如果没有要更新的字段，则直接返回
+            if not update_fields:
+                return False
+                
+            # 更新时间戳
+            update_fields.append("updated_at = NOW()")
+            
+            # 构建SQL
+            sql = f"""
+            UPDATE douyin_video_novel 
+            SET {', '.join(update_fields)}
+            WHERE id = %s
+            """
+            
+            update_values.append(id)
+            self.cursor.execute(sql, tuple(update_values))
+            self.connection.commit()
+            
+            affected_rows = self.cursor.rowcount
+            if affected_rows > 0:
+                db_logger.info(f"更新抖音视频与小说关联记录成功: ID {id}")
+                return True
+            else:
+                db_logger.warning(f"未找到抖音视频与小说关联记录: ID {id}")
+                return False
+                
+        except Exception as e:
+            db_logger.error(f"更新抖音视频与小说关联记录失败: {str(e)}")
+            self.connection.rollback()
+            return False
+            
+    def get_douyin_video_novels_by_video_id(self, douyin_video_id):
+        """根据抖音视频ID获取所有小说关联信息
+        
+        Args:
+            douyin_video_id: 抖音视频表ID
+            
+        Returns:
+            关联记录列表，如果不存在则返回空列表
+        """
+        try:
+            sql = "SELECT * FROM douyin_video_novel WHERE douyin_video_id = %s"
+            self.cursor.execute(sql, (douyin_video_id,))
+            results = self.cursor.fetchall()
+            
+            db_logger.info(f"查询抖音视频与小说关联记录成功: 视频ID {douyin_video_id}, 匹配 {len(results)} 条记录")
+            return results
+            
+        except Exception as e:
+            db_logger.error(f"查询抖音视频与小说关联记录失败: {str(e)}")
+            return []
+
+    def get_all_novel_names(self, limit=100):
+        """获取所有小说的名称列表
+        
+        Args:
+            limit: 限制返回数量
+            
+        Returns:
+            小说名称列表 [(id, title, author), ...]
+        """
+        try:
+            sql = """
+            SELECT id, title, author FROM novel
+            ORDER BY title
+            LIMIT %s
+            """
+            
+            self.cursor.execute(sql, (limit,))
+            results = self.cursor.fetchall()
+            
+            db_logger.info(f"查询小说名称列表: 返回 {len(results)} 条记录")
+            return results
+            
+        except Exception as e:
+            db_logger.error(f"查询小说名称列表失败: {str(e)}")
+            return []
 
     def insert_novel(self, title, author="", description="", source_url="", category_id=1):
         """插入或更新小说数据
@@ -472,4 +898,171 @@ class Database:
         result = self.cursor.fetchone()
         count = result[0] if result else 0
         db_logger.info(f"统计小说章节: 小说ID {novel_id}, 共 {count} 章")
-        return count 
+        return count
+
+    # === 待收录小说相关方法 ===
+    
+    def insert_to_do_novel(self, novel_name, douyin_video_id=None, recommendation_reason=""):
+        """插入待收录小说记录
+        
+        Args:
+            novel_name: 小说名称
+            douyin_video_id: 抖音视频表ID
+            recommendation_reason: 推荐原因（视频中的描述）
+            
+        Returns:
+            记录ID，如果插入失败则返回None
+        """
+        try:
+            # 检查是否已存在相同名称的记录
+            sql = "SELECT id, status FROM to_do_novel WHERE novel_name = %s"
+            self.cursor.execute(sql, (novel_name,))
+            existing_record = self.cursor.fetchone()
+            
+            if existing_record:
+                record_id = existing_record[0]
+                status = existing_record[1]
+                
+                # 如果状态是pending，并且有新的推荐原因，则更新
+                if status == 'pending' and recommendation_reason:
+                    update_sql = """
+                    UPDATE to_do_novel 
+                    SET douyin_video_id = %s, recommendation_reason = %s, updated_at = NOW()
+                    WHERE id = %s
+                    """
+                    self.cursor.execute(update_sql, (douyin_video_id, recommendation_reason, record_id))
+                    self.connection.commit()
+                    db_logger.info(f"更新待收录小说推荐原因: {novel_name}, ID: {record_id}")
+                    
+                db_logger.info(f"已存在待收录小说记录: {novel_name}, ID: {record_id}, 状态: {status}")
+                return record_id
+            
+            # 准备插入数据
+            sql = """
+            INSERT INTO to_do_novel (
+                novel_name, douyin_video_id, recommendation_reason, status
+            ) VALUES (%s, %s, %s, %s)
+            """
+            
+            values = (
+                novel_name, douyin_video_id, recommendation_reason, 'pending'
+            )
+            
+            self.cursor.execute(sql, values)
+            self.connection.commit()
+            
+            record_id = self.cursor.lastrowid
+            db_logger.info(f"成功插入待收录小说记录: ID {record_id}, 小说: {novel_name}")
+            return record_id
+            
+        except Exception as e:
+            db_logger.error(f"插入待收录小说记录失败: {str(e)}")
+            self.connection.rollback()
+            return None
+    
+    def update_to_do_novel_status(self, id, status, novel_id=None):
+        """更新待收录小说状态
+        
+        Args:
+            id: 待收录小说ID
+            status: 状态 (pending/ignored/added)
+            novel_id: 如果已添加，关联的小说ID
+            
+        Returns:
+            是否更新成功
+        """
+        try:
+            update_fields = ["status = %s"]
+            update_values = [status]
+            
+            if novel_id is not None and status == 'added':
+                # 如果状态是已添加，则记录关联的小说ID（可选）
+                update_fields.append("novel_id = %s")
+                update_values.append(novel_id)
+            
+            # 更新时间戳
+            update_fields.append("updated_at = NOW()")
+            
+            # 构建SQL
+            sql = f"""
+            UPDATE to_do_novel 
+            SET {', '.join(update_fields)}
+            WHERE id = %s
+            """
+            
+            update_values.append(id)
+            self.cursor.execute(sql, tuple(update_values))
+            self.connection.commit()
+            
+            affected_rows = self.cursor.rowcount
+            if affected_rows > 0:
+                db_logger.info(f"更新待收录小说状态成功: ID {id}, 状态: {status}")
+                return True
+            else:
+                db_logger.warning(f"未找到待收录小说记录: ID {id}")
+                return False
+                
+        except Exception as e:
+            db_logger.error(f"更新待收录小说状态失败: {str(e)}")
+            self.connection.rollback()
+            return False
+    
+    def get_pending_to_do_novels(self, limit=100):
+        """获取待处理的待收录小说列表
+        
+        Args:
+            limit: 限制返回数量
+            
+        Returns:
+            待处理小说列表
+        """
+        try:
+            sql = """
+            SELECT t.*, d.title as video_title, d.author as video_author
+            FROM to_do_novel t
+            LEFT JOIN douyin_video d ON t.douyin_video_id = d.id
+            WHERE t.status = 'pending'
+            ORDER BY t.created_at DESC
+            LIMIT %s
+            """
+            
+            self.cursor.execute(sql, (limit,))
+            results = self.cursor.fetchall()
+            
+            db_logger.info(f"查询待处理小说列表: 返回 {len(results)} 条记录")
+            return results
+            
+        except Exception as e:
+            db_logger.error(f"查询待处理小说列表失败: {str(e)}")
+            return []
+            
+    def get_to_do_novel_by_name(self, novel_name):
+        """根据小说名称获取待收录小说记录
+        
+        Args:
+            novel_name: 小说名称
+            
+        Returns:
+            待收录小说记录，如果不存在则返回None
+        """
+        try:
+            sql = """
+            SELECT t.*, d.title as video_title, d.author as video_author
+            FROM to_do_novel t
+            LEFT JOIN douyin_video d ON t.douyin_video_id = d.id
+            WHERE t.novel_name = %s
+            """
+            
+            self.cursor.execute(sql, (novel_name,))
+            result = self.cursor.fetchone()
+            
+            if result:
+                db_logger.info(f"查询待收录小说成功: {novel_name}")
+            else:
+                db_logger.info(f"未找到待收录小说: {novel_name}")
+                
+            return result
+            
+        except Exception as e:
+            db_logger.error(f"查询待收录小说失败: {str(e)}")
+            return None 

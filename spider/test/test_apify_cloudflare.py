@@ -7,7 +7,7 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 
 # 直接写死token
-APIFY_TOKEN = "apify_api_gXcR5utLXbObk3xaDgzFeZSfUiQ8Nv3oV5P6"
+APIFY_TOKEN = "apify_api_VUFsBbnsWHlfzfYXqvCJi7OmlOAntY4hq3a0"
 ACTOR_ID = "ChNuXurElMWvpbJB9"
 
 logging.basicConfig(level=logging.INFO)

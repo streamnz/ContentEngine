@@ -146,9 +146,11 @@ class NovelCrawler:
                 'java_script_enabled': True,
                 'bypass_csp': True,
             }
-            # 使用 Firefox 浏览器
+            # profile_dir: 每个进程独立的firefox profile目录，避免并发冲突
+            profile_dir = os.path.abspath(f"./firefox-profile-playwright/session_{os.getpid()}")
+            os.makedirs(profile_dir, exist_ok=True)
             self.browser = await self.playwright.firefox.launch_persistent_context(
-                os.path.abspath("./firefox-profile-playwright"),
+                profile_dir,
                 headless=False,
                 **context_options
             )

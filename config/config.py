@@ -60,7 +60,7 @@ CRAWLER_CONFIG = {
     'output_dir': 'output',   # 输出目录
     'max_novels': 100,        # 最大小说数量限制
     'max_chapters': 10000,     # 最大章节数量限制
-    'base_url': 'https://www.hetushu.com/book/4917/index.html',  # 默认测试URL
+    'base_url': 'https://www.bqgl.cc/look/3432/',  # 默认测试URL
     'headers': {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
@@ -134,4 +134,11 @@ APIFY_CONFIG = {
     'proxy_groups': ['RESIDENTIAL'],  # 使用住宅代理
     'js_timeout': 30,  # JavaScript 执行超时时间（秒）
     'max_retries': 3,  # 最大重试次数
+}
+
+# 腾讯云ASR配置
+TENCENTCLOUD_CONFIG = {
+    'appid': os.getenv('TENCENTCLOUD_APPID'),
+    'secret_id': os.getenv('TENCENTCLOUD_SECRET_ID'),
+    'secret_key': os.getenv('TENCENTCLOUD_SECRET_KEY'),
 } 
