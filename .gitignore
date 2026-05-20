@@ -24,7 +24,10 @@ wheels/
 venv/
 env/
 ENV/
-novels/
+/novels/
+
+# macOS
+.DS_Store
 
 # IDE
 .idea/
@@ -49,14 +52,10 @@ playwright/.cache/
 playwright/.local-browsers/
 
 # Project specific
-novels/
-*.txt 
-
 chrome-profile-playwright/
 firefox-profile-playwright/
 
-# 忽略data目录下的所有内容
-/data/
+# Audio / video (GitHub should not store large media; use object storage or LFS if needed)
 
 # 忽略常见音频文件
 *.mp3
